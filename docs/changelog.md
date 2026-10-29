@@ -8,6 +8,16 @@ tags:
 
 # Changelog
 
+## v1.2.0
+
+**New Features**
+
+- Adding Sentinel-1 Zarr format reader
+
+**Incompatible Changes**
+
+- Re-organization of Sentinel-1 SAFE format reader to be compatible with the Sentinel-1 Zarr format reader
+
 ## v1.1.2
 
 **Bug fixes**
