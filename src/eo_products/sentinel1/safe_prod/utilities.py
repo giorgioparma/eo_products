@@ -6,14 +6,11 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
-from enum import Enum
 from pathlib import Path
 
 import numpy as np
 from lxml import etree
 from numpy.polynomial.polynomial import Polynomial
-from perseo_core.geometry.navigation import Trajectory
 from perseo_core.timing import PreciseDateTime
 
 from eo_products.common.utilities import (
@@ -30,11 +27,28 @@ from eo_products.common.utilities import (
     SARProjection,
     SARRadiometricQuantity,
     SARSamplingFrequencies,
-    StandardSARAcquisitionMode,
     StateVectors,
     SwathInfo,
 )
+from eo_products.sentinel1.common import (
+    S1_SIDE_LOOKING,
+    S1AcquisitionMode,
+    S1AntennaPattern,
+    S1Attitude,
+    S1AzimuthNoiseVector,
+    S1ChirpReplica,
+    S1DCEstimateMethod,
+    S1GeneralChannelInfo,
+    S1L1ProductType,
+    S1Noise,
+    S1OrbitType,
+    S1Pulse,
+    S1RangeNoiseVector,
+    S1ReferenceFrameType,
+    get_standard_acq_mode,
+)
 
+PRODUCT_FORMAT_EXTENSION = ".SAFE"
 _IMAGE_FORMAT = ".tiff"
 _METADATA_EXTENSION = ".xml"
 _S1_TX_PULSE_LATCH_TIME = 1.439e-6  # [s]
@@ -46,14 +60,6 @@ class ChannelDataPairMismatch(RuntimeError):
 
 class InvalidChannelId(RuntimeError):
     """Invalid channel number"""
-
-
-class InvalidSAFEProduct(RuntimeError):
-    """Invalid SAFE product"""
-
-
-class InvalidTimeBoundaries(RuntimeError):
-    """Invalid time boundaries with respect to validity period"""
 
 
 # camel case pattern
@@ -74,84 +80,6 @@ def convert_camel2snake(text: str) -> str:
         snake_case text
     """
     return _cc_pattern.sub("_", text).lower()
-
-
-class S1OrbitType(Enum):
-    """EOrbitType class"""
-
-    DOWNLINK = "DOWNLINK"
-    PREDICTED = "PREDICTED"
-    RESTITUTED = "RESTITUTED"
-    PRECISE = "PRECISE"
-    UNKNOWN = "UNKNOWN"
-
-
-class S1DCEstimateMethod(Enum):
-    """Doppler Centroid estimate method: data or geometry"""
-
-    DATA = "DATA"
-    GEOMETRY = "GEOMETRY"
-
-
-class S1AcquisitionMode(Enum):
-    """Sentinel-1 acquisition modes"""
-
-    IW = "IW"  # Interferometric Wide swath (IW)
-    EW = "EW"  # Extra-Wide swath (EW)
-    WV = "WV"  # Wave (WV): single polarization only (HH or VV)
-    SM = "SM"  # Stripmap (SM)
-    EN = "EN"  # Elevation Notch (instrument calibration mode)
-    AN = "AN"  # Azimuth Notch (instrument calibration mode)
-    S1 = "S1"  # Stripmap S1
-    S2 = "S2"  # Stripmap S2
-    S3 = "S3"  # Stripmap S3
-    S4 = "S4"  # Stripmap S4
-    S5 = "S5"  # Stripmap S5
-    S6 = "S6"  # Stripmap S6
-
-
-class S1ResolutionClasses(Enum):
-    """Sentinel-1 resolution classes"""
-
-    FR = "FR"  # Full resolution
-    HR = "HR"  # High resolution
-    MR = "MR"  # Medium resolution
-
-
-class S1Polarization(Enum):
-    """Sentinel-1 signal polarization"""
-
-    HH = "HH"
-    VV = "VV"
-    HV = "HV"
-    VH = "VH"
-
-
-class S1ReferenceFrameType(Enum):
-    """Sentinel-1 available reference frames"""
-
-    UNDEFINED = "Undefined"
-    GALACTIC = "Galactic"
-    BM1950 = "BM1950"
-    BM2000 = "BM2000"
-    HM2000 = "HM2000"
-    GM2000 = "GM2000"
-    MEAN_OF_DATE = "Mean Of Date"
-    TRUE_OF_DATE = "True Of Date"
-    PSEUDO_EARTH_FIXED = "Pseudo Earth Fixed"
-    EARTH_FIXED = "Earth Fixed"
-    TOPOCENTRIC = "Topocentric"
-    SATELLITE_ORBITAL = "Satellite Orbital"
-    SATELLITE_NORMAL = "Satellite Nominal"
-    SATELLITE_ATTITUDE = "Satellite Attitude"
-    INSTRUMENT_ATTITUDE = "Instrument Attitude"
-
-
-class S1L1ProductType(Enum):
-    """Sentinel-1 L1 product types"""
-
-    SLC = "SLC"  # Slant Range, Single Look Complex (SLC, lvl 1)
-    GRD = "GRD"  # Ground Range Multi Look Detected (GRD, lvl 1, phase lost)
 
 
 def _extract_channel_name_from_file(filename: str, is_wave: bool) -> str:
@@ -316,7 +244,7 @@ def dataset_info_from_metadata_nodes(header_node: etree._Element, product_info_n
         image_type="MULTILOOK" if header_dict["product_type"].upper() == "GRD" else "AZIMUTH FOCUSED RANGE COMPENSATED",
         projection=product_info_dict["projection"].upper(),
         sensor_name=header_dict["mission_id"],
-        side_looking="RIGHT",
+        side_looking=S1_SIDE_LOOKING,
     )
 
 
@@ -631,7 +559,7 @@ def noise_from_metadata_nodes(noise_list_node: etree._Element) -> dict[str, S1No
     """
 
     dict_keys = {k.find("swath").text for k in noise_list_node}
-    noise = {key: S1Noise.from_metadata_node(noise_list_node=noise_list_node, swath=key) for key in sorted(dict_keys)}
+    noise = {key: s1_noise_from_metadata_node(noise_list_node=noise_list_node, swath=key) for key in sorted(dict_keys)}
 
     return noise
 
@@ -652,7 +580,7 @@ def antenna_pattern_from_metadata_nodes(antenna_pattern_list_node: etree._Elemen
 
     dict_keys = {k.find("swath").text for k in antenna_pattern_list_node}
     antenna = {
-        key: S1AntennaPattern.from_metadata_node(antenna_pattern_list_node=antenna_pattern_list_node, swath=key)
+        key: s1_antenna_pattern_from_metadata_node(antenna_pattern_list_node=antenna_pattern_list_node, swath=key)
         for key in sorted(dict_keys)
     }
 
@@ -678,627 +606,355 @@ def burst_sensing_times_from_metadata(burst_node: etree._Element) -> np.ndarray 
     return None
 
 
-def _get_noise_vector_at(
-    swath: str,
-    azimuth_index: int,
-    azimuth_noise_vectors: list[S1AzimuthNoiseVector] | None,
-    range_noise_vectors: list[S1RangeNoiseVector],
-    is_grd: bool,
-) -> np.ndarray:
-    if azimuth_noise_vectors is None:
-        azimuth_noise_factor = np.ones(range_noise_vectors[0].pixels[-1] + 1)
-    else:
-        if is_grd:
-            swath_az_vectors = [v for v in azimuth_noise_vectors if swath in v.swath]
-        else:
-            swath_az_vectors = [v for v in azimuth_noise_vectors if v.swath == swath]
-        selected = [s for s in swath_az_vectors if s.first_azimuth_line <= azimuth_index <= s.last_azimuth_line]
-        if not selected:
-            raise ValueError(f"No azimuth noise vectors found for given index {azimuth_index}")
-
-        chunks = []
-        for s in selected:
-            val = np.interp(azimuth_index, s.lines, s.lut)
-            length = s.last_range_sample - s.first_range_sample + 1
-            chunks.append(np.full(length, val))
-
-        azimuth_noise_factor = np.concatenate(chunks)
-
-    lines = np.array([r.line for r in range_noise_vectors])
-    idx = np.searchsorted(lines, azimuth_index, side="right") - 1
-    noise_vector_idx = int(np.clip(idx, 0, len(lines) - 1))
-
-    if noise_vector_idx < len(range_noise_vectors) - 1:
-        range_noise_vector_0 = np.interp(
-            np.arange(0, azimuth_noise_factor.size),
-            range_noise_vectors[noise_vector_idx].pixels,
-            range_noise_vectors[noise_vector_idx].lut,
-        )
-        range_noise_vector_1 = np.interp(
-            np.arange(0, azimuth_noise_factor.size),
-            range_noise_vectors[noise_vector_idx + 1].pixels,
-            range_noise_vectors[noise_vector_idx + 1].lut,
-        )
-        interp_weight = (azimuth_index - range_noise_vectors[noise_vector_idx].line) / (
-            range_noise_vectors[noise_vector_idx + 1].line - range_noise_vectors[noise_vector_idx].line
-        )
-        range_noise_vector = (1 - interp_weight) * range_noise_vector_0 + interp_weight * range_noise_vector_1
-    else:
-        range_noise_vector = np.interp(
-            np.arange(0, azimuth_noise_factor.size),
-            range_noise_vectors[noise_vector_idx].pixels,
-            range_noise_vectors[noise_vector_idx].lut,
-        )
-    return range_noise_vector * azimuth_noise_factor
-
-
-def get_noise_vectors(
-    swath: str,
-    azimuth_indexes: int | tuple[int, int],
-    azimuth_noise_vectors: list[S1AzimuthNoiseVector] | None,
-    range_noise_vectors: list[S1RangeNoiseVector],
-    is_grd: bool,
-) -> np.ndarray:
-    """Get the noise vector(s) from Sentinel-1 annotation file for the given azimuth index(es).
+def general_channel_info_from_metadata(
+    header_node: etree._Element, product_info_node: etree._Element
+) -> tuple[S1GeneralChannelInfo, float]:
+    """Generate S1GeneralChannelInfo from xml metadata.
 
     Parameters
     ----------
+    header_node : etree._Element
+        xml header node
+    product_info_node : etree._Element
+        xml product_info node
+
+    Returns
+    -------
+    S1GeneralChannelInfo
+        S1GeneralChannelInfo object
+    float
+        range sampling rate
+    """
+
+    header_dict = dict([(convert_camel2snake(h.tag), h.text) for h in header_node])
+    product_info_dict = dict([(convert_camel2snake(p.tag), p.text) for p in product_info_node])
+
+    polarization = header_dict["polarisation"]
+    # converting the polarization string value to a proper input format for SARPolarization enum
+    if len(polarization) == 2:
+        polarization = polarization[0] + "/" + polarization[1]
+
+    mode = S1AcquisitionMode(header_dict["mode"])
+    mode_std = get_standard_acq_mode(mode)
+
+    channel_info = S1GeneralChannelInfo(
+        mission_id=header_dict["mission_id"],
+        swath=header_dict["swath"],
+        product_type=S1L1ProductType(header_dict["product_type"]),
+        polarization=SARPolarization(polarization),
+        projection=SARProjection(product_info_dict["projection"].upper()),
+        mode=mode,
+        acquisition_mode_std=mode_std,
+        orbit_direction=OrbitDirection(product_info_dict["pass"].lower()),
+        signal_frequency=float(product_info_dict["radar_frequency"]),
+        start_time=PreciseDateTime.from_utc_string(header_dict["start_time"]),
+        stop_time=PreciseDateTime.from_utc_string(header_dict["stop_time"]),
+    )
+    sampling_rate = float(product_info_dict["range_sampling_rate"])
+    return channel_info, sampling_rate
+
+
+def pulse_from_metadata_nodes(swath_processing_node: etree._Element, downlink_info_node: etree._Element) -> S1Pulse:
+    """Generating S1Pulse object directly from metadata xml nodes.
+
+    Parameters
+    ----------
+    swath_processing_node : etree._Element
+        swathProcParams xml node
+    downlink_info_node : etree._Element
+        downlinkInformation xml node
+
+    Returns
+    -------
+    S1Pulse
+        pulse info dataclass
+    """
+    # TODO: check this
+    return S1Pulse(
+        length=float(downlink_info_node.find("downlinkValues/txPulseLength").text),
+        bandwidth=float(swath_processing_node.find("rangeProcessing/totalBandwidth").text),
+        energy=1.0,
+        start_frequency=float(downlink_info_node.find("downlinkValues/txPulseStartFrequency").text),
+        start_phase=0.0,
+        direction="UP",
+    )
+
+
+def attitude_from_metadata_node(attitude_node: etree._Element) -> S1Attitude:
+    """Generating S1Attitude object directly from metadata xml node.
+
+    Parameters
+    ----------
+    attitude_node : etree._Element
+        attitudeList xml node
+
+    Returns
+    -------
+    S1Attitude
+        sensor's attitude dataclass
+    """
+
+    numerosity = int(attitude_node.values()[0])
+    quaternions = _get_attitude_quaternions_from_node(node=attitude_node)
+    angular_velocities = _get_attitude_angular_velocities_from_node(node=attitude_node)
+    yaw = np.array([float(y.text) for y in attitude_node.findall("./attitude/yaw")])
+    pitch = np.array([float(p.text) for p in attitude_node.findall("./attitude/pitch")])
+    roll = np.array([float(r.text) for r in attitude_node.findall("./attitude/roll")])
+    frames = [frame.text for frame in attitude_node.findall("./attitude/frame")]
+    time_axis = np.array(
+        [PreciseDateTime.from_utc_string(time.text) for time in attitude_node.findall("./attitude/time")]
+    )
+
+    assert len(set(frames)) == 1
+    assert (
+        quaternions.shape[0]
+        == angular_velocities.shape[0]
+        == yaw.size
+        == pitch.size
+        == roll.size
+        == time_axis.size
+        == len(frames)
+        == numerosity
+    )
+
+    return S1Attitude(
+        num=numerosity,
+        quaternions=quaternions,
+        angular_velocities=angular_velocities,
+        frame=S1ReferenceFrameType(set(frames).pop()),
+        yaw=yaw,
+        pitch=pitch,
+        roll=roll,
+        time_axis=time_axis,
+    )
+
+
+def chirp_replica_from_metadata_node(replica_info_node: etree._Element) -> S1ChirpReplica:
+    """Generating S1ChirpReplica object directly from metadata xml nodes.
+
+    Parameters
+    ----------
+    replica_info_node : etree._Element
+        replicaInformation metadata xml node
+
+    Returns
+    -------
+    S1ChirpReplica
+        chirp replica dataclass
+    """
+
+    # for item in replica_info_node:
+    swath = replica_info_node.find("swath").text
+    replica_list = replica_info_node.find("replicaList")
+    time_axis = np.array([PreciseDateTime.from_utc_string(rep.find("azimuthTime").text) for rep in replica_list])
+    cross_correlation_bandwidth = np.array([float(rep.find("crossCorrelationBandwidth").text) for rep in replica_list])
+    cross_correlation_pslr = np.array([float(rep.find("crossCorrelationPslr").text) for rep in replica_list])
+    cross_correlation_islr = np.array([float(rep.find("crossCorrelationIslr").text) for rep in replica_list])
+    cross_correlation_peak_location = np.array(
+        [float(rep.find("crossCorrelationPeakLocation").text) for rep in replica_list]
+    )
+    pg_product_amplitude = np.array([float(rep.find("pgProductAmplitude").text) for rep in replica_list])
+    pg_product_phase = np.array([float(rep.find("pgProductPhase").text) for rep in replica_list])
+    model_pg_product_amplitude = np.array([float(rep.find("modelPgProductAmplitude").text) for rep in replica_list])
+    model_pg_product_phase = np.array([float(rep.find("modelPgProductPhase").text) for rep in replica_list])
+    internal_time_delay = np.array([float(rep.find("internalTimeDelay").text) for rep in replica_list])
+    reconstructed_replica_validity = [bool(rep.find("reconstructedReplicaValidFlag").text) for rep in replica_list]
+    relative_validity = [bool(rep.find("relativePgProductValidFlag").text) for rep in replica_list]
+    absolute_validity = [bool(rep.find("absolutePgProductValidFlag").text) for rep in replica_list]
+
+    return S1ChirpReplica(
+        swath=swath,
+        time_axis=time_axis,
+        cross_correlation_bandwidth=cross_correlation_bandwidth,
+        cross_correlation_pslr=cross_correlation_pslr,
+        cross_correlation_islr=cross_correlation_islr,
+        cross_correlation_peak_location=cross_correlation_peak_location,
+        pg_product_amplitude=pg_product_amplitude,
+        pg_product_phase=pg_product_phase,
+        model_pg_product_amplitude=model_pg_product_amplitude,
+        model_pg_product_phase=model_pg_product_phase,
+        internal_time_delay=internal_time_delay,
+        reconstructed_replica_validity=reconstructed_replica_validity,
+        relative_validity=relative_validity,
+        absolute_validity=absolute_validity,
+    )
+
+
+def s1_antenna_pattern_from_metadata_node(antenna_pattern_list_node: etree._Element, swath: str) -> S1AntennaPattern:
+    """Generating S1AntennaPattern object directly from metadata xml nodes.
+
+    Parameters
+    ----------
+    antenna_pattern_list_node : etree._Element
+        antennaPatternList metadata xml node
     swath : str
-        current swath name
-    azimuth_indexes : int | tuple[int, int]
-        azimuth index (int) at which the noise vector is to be computed, or a tuple [start, stop) of azimuth indices to
-        get multiple vectors in the inclusive range (start included, stop excluded).
-    azimuth_noise_vectors : list[S1AzimuthNoiseVector] | None
-        azimuth noise vectors, if any else None
-    range_noise_vectors : list[S1RangeNoiseVector]
-        range noise vectors
-    is_grd : bool
-        flag to indicate if the product is a GRD or not
+        swath of interest
+
+    Returns
+    -------
+    S1Noise
+        antenna pattern dataclass
+    """
+
+    # taking only the nodes corresponding to the selected swath
+    filtered_nodes = filter(lambda x: x.find("swath").text == swath, antenna_pattern_list_node)
+
+    def _parse_ap(array: np.ndarray) -> np.ndarray:
+        return array[:, 0] + 1j * array[:, 1]
+
+    time_axis = []
+    slant_range_time_array = []
+    elevation_angle_array = []
+    elevation_pattern_array = []
+    incidence_angle = []
+    terrain_height = []
+    roll = []
+    for item in filtered_nodes:
+        time_axis.append(PreciseDateTime.from_utc_string(item.find("azimuthTime").text))
+        slant_range_time_array.append(np.array([float(c) for c in item.find("slantRangeTime").text.split(" ") if c]))
+        elevation_angle_array.append(np.array([float(c) for c in item.find("elevationAngle").text.split(" ") if c]))
+        elevation_pattern_array.append(
+            _parse_ap(np.array([float(c) for c in item.find("elevationPattern").text.split(" ") if c]).reshape(-1, 2))
+        )
+        incidence_angle.append(np.array([float(c) for c in item.find("incidenceAngle").text.split(" ") if c]))
+        terrain_height.append(float(item.find("terrainHeight").text))
+        roll.append(float(item.find("roll").text))
+
+    return S1AntennaPattern(
+        swath=swath,
+        time_axis=np.array(time_axis),
+        slant_range_time_array=np.stack(slant_range_time_array),
+        elevation_angle_array=np.stack(elevation_angle_array),
+        elevation_pattern_array=np.stack(elevation_pattern_array),
+        incidence_angle=np.stack(incidence_angle),
+        terrain_height=np.array(terrain_height),
+        roll=np.array(roll),
+    )
+
+
+def s1_noise_from_metadata_node(noise_list_node: etree._Element, swath: str) -> S1Noise:
+    """Generating S1Noise object directly from metadata xml nodes.
+
+    Parameters
+    ----------
+    noise_list_node : etree._Element
+        noiseList metadata xml node
+    swath : str
+        swath of interest
+
+    Returns
+    -------
+    S1Noise
+        noise correction factor dataclass
+    """
+
+    # taking only the nodes corresponding to the selected swath
+    filtered_nodes = filter(lambda x: x.find("swath").text == swath, noise_list_node)
+
+    time_axis = []
+    noise_power_correction_factor = []
+    noise_lines_num = []
+    for item in filtered_nodes:
+        time_axis.append(PreciseDateTime.from_utc_string(item.find("azimuthTime").text))
+        noise_power_correction_factor.append(float(item.find("noisePowerCorrectionFactor").text))
+        noise_lines_num.append(int(item.find("numberOfNoiseLines").text))
+
+    return S1Noise(
+        swath=swath,
+        time_axis=np.array(time_axis),
+        noise_power_correction_factor=np.array(noise_power_correction_factor),
+        noise_lines_num=np.array(noise_lines_num),
+    )
+
+
+def rng_noise_vector_from_node(node: etree._Element) -> S1RangeNoiseVector:
+    """Generating S1RangeNoiseVector object directly from metadata xml node.
+
+    Parameters
+    ----------
+    node : etree._Element
+        noiseRangeVectorList/noiseRangeVector xml node
+
+    Returns
+    -------
+    S1RangeNoiseVector
+        object corresponding to the input xml node
+    """
+    azimuth_time = PreciseDateTime.from_utc_string(node.find("azimuthTime").text)
+    line = int(node.find("line").text)
+    pixels = np.array([int(p) for p in node.find("pixel").text.split()])
+    lut = np.array([float(p) for p in node.find("noiseRangeLut").text.split()])
+    return S1RangeNoiseVector(azimuth_time=azimuth_time, line=line, pixels=pixels, lut=lut)
+
+
+def az_noise_vector_from_node(node: etree._Element) -> S1AzimuthNoiseVector:
+    """Generating S1AzimuthNoiseVector object directly from metadata xml node.
+
+    Parameters
+    ----------
+    node : etree._Element
+        noiseAzimuthVectorList/noiseAzimuthVector xml node
+
+    Returns
+    -------
+    S1AzimuthNoiseVector
+        object corresponding to the input xml node
+    """
+    swath = node.find("swath").text
+    first_azimuth_line = int(node.find("firstAzimuthLine").text)
+    last_azimuth_line = int(node.find("lastAzimuthLine").text)
+    first_range_sample = int(node.find("firstRangeSample").text)
+    last_range_sample = int(node.find("lastRangeSample").text)
+    lines = np.array([int(p) for p in node.find("line").text.split()])
+    lut = np.array([float(p) for p in node.find("noiseAzimuthLut").text.split()])
+    return S1AzimuthNoiseVector(
+        swath=swath,
+        first_azimuth_line=first_azimuth_line,
+        last_azimuth_line=last_azimuth_line,
+        first_range_sample=first_range_sample,
+        last_range_sample=last_range_sample,
+        lines=lines,
+        lut=lut,
+    )
+
+
+def _get_attitude_quaternions_from_node(node: etree._Element) -> np.ndarray:
+    """Extracting quaternions array shape (N, 4) with q0, q1, q2 and q3 components from xml attitude node.
+
+    Parameters
+    ----------
+    node : etree._Element
+        attitudeList xml node
 
     Returns
     -------
     np.ndarray
-        noise vectors along range samples, with shape (N,) when azimuth_index is an int, (M, N) when azimuth_index
-        is a tuple.
-
-    Raises
-    ------
-    ValueError
-        if no azimuth noise vectors are found for the given azimuth index
+        quaternions array, (N, 4)
     """
-    if isinstance(azimuth_indexes, tuple):
-        start, stop = azimuth_indexes
-        return np.array(
-            [
-                _get_noise_vector_at(swath, idx, azimuth_noise_vectors, range_noise_vectors, is_grd)
-                for idx in range(start, stop)
-            ]
-        )
-    return _get_noise_vector_at(swath, azimuth_indexes, azimuth_noise_vectors, range_noise_vectors, is_grd)
-
-
-@dataclass
-class S1ChirpReplica:
-    """Sentinel-1 PG chirp replica parameters derived from the calibration pulses at 100 MHz bandwidth dataclass"""
-
-    swath: str  # swath of to the current chirp replica
-    time_axis: np.ndarray  # Zero Doppler azimuth time at which replica applies
-    cross_correlation_bandwidth: (
-        np.ndarray
-    )  # 3-dB pulse width of cross-correlation function between the reconstructed replica and the nominal replica
-    cross_correlation_pslr: (
-        np.ndarray
-    )  # pslr of cross-correlation function between the reconstructed replica and the nominal replica
-    cross_correlation_islr: (
-        np.ndarray
-    )  # islr of cross-correlation function between the reconstructed replica and the nominal replica
-    cross_correlation_peak_location: (
-        np.ndarray
-    )  # peak location of cross-correlation function between the reconstructed replica and the nominal replica [samples]
-    pg_product_amplitude: np.ndarray  # amplitude of the PG product derived from this replica
-    pg_product_phase: np.ndarray  # phase of the PG product derived from this replica [radians]
-    model_pg_product_amplitude: np.ndarray  # PG product amplitude value from the input PG product model
-    model_pg_product_phase: np.ndarray  # PG product phase value from the input PG product model [radians]
-    internal_time_delay: (
-        np.ndarray
-    )  # calculated deviation of the location of this PG replica from the location of the transmitted pulse
-    reconstructed_replica_validity: list[
-        bool
-    ]  # if the cross-correlation between the nominal and this extracted PG replica resulted in a valid peak location
-    relative_validity: list[bool]  # if the amplitude and phase of the PG product passed relative validation
-    absolute_validity: list[bool]  # if the amplitude and phase of the PG product passed the absolute validation
-
-    @staticmethod
-    def from_metadata_node(replica_info_node: etree._Element) -> S1ChirpReplica:
-        """Generating S1ChirpReplica object directly from metadata xml nodes.
-
-        Parameters
-        ----------
-        replica_info_node : etree._Element
-            replicaInformation metadata xml node
-
-        Returns
-        -------
-        S1ChirpReplica
-            chirp replica dataclass
-        """
-
-        # for item in replica_info_node:
-        swath = replica_info_node.find("swath").text
-        replica_list = replica_info_node.find("replicaList")
-        time_axis = np.array([PreciseDateTime.from_utc_string(rep.find("azimuthTime").text) for rep in replica_list])
-        cross_correlation_bandwidth = np.array(
-            [float(rep.find("crossCorrelationBandwidth").text) for rep in replica_list]
-        )
-        cross_correlation_pslr = np.array([float(rep.find("crossCorrelationPslr").text) for rep in replica_list])
-        cross_correlation_islr = np.array([float(rep.find("crossCorrelationIslr").text) for rep in replica_list])
-        cross_correlation_peak_location = np.array(
-            [float(rep.find("crossCorrelationPeakLocation").text) for rep in replica_list]
-        )
-        pg_product_amplitude = np.array([float(rep.find("pgProductAmplitude").text) for rep in replica_list])
-        pg_product_phase = np.array([float(rep.find("pgProductPhase").text) for rep in replica_list])
-        model_pg_product_amplitude = np.array([float(rep.find("modelPgProductAmplitude").text) for rep in replica_list])
-        model_pg_product_phase = np.array([float(rep.find("modelPgProductPhase").text) for rep in replica_list])
-        internal_time_delay = np.array([float(rep.find("internalTimeDelay").text) for rep in replica_list])
-        reconstructed_replica_validity = [bool(rep.find("reconstructedReplicaValidFlag").text) for rep in replica_list]
-        relative_validity = [bool(rep.find("relativePgProductValidFlag").text) for rep in replica_list]
-        absolute_validity = [bool(rep.find("absolutePgProductValidFlag").text) for rep in replica_list]
-
-        return S1ChirpReplica(
-            swath=swath,
-            time_axis=time_axis,
-            cross_correlation_bandwidth=cross_correlation_bandwidth,
-            cross_correlation_pslr=cross_correlation_pslr,
-            cross_correlation_islr=cross_correlation_islr,
-            cross_correlation_peak_location=cross_correlation_peak_location,
-            pg_product_amplitude=pg_product_amplitude,
-            pg_product_phase=pg_product_phase,
-            model_pg_product_amplitude=model_pg_product_amplitude,
-            model_pg_product_phase=model_pg_product_phase,
-            internal_time_delay=internal_time_delay,
-            reconstructed_replica_validity=reconstructed_replica_validity,
-            relative_validity=relative_validity,
-            absolute_validity=absolute_validity,
-        )
-
-
-@dataclass
-class S1Noise:
-    """Sentinel-1 thermal noise parameters derived from noise packets dataclass"""
-
-    swath: str  # swath of to the current noise data
-    time_axis: np.ndarray  # Zero Doppler azimuth time of the noise measurement
-    noise_power_correction_factor: np.ndarray  # noise power correction factor
-    noise_lines_num: np.ndarray  # number of noise lines used to calculate noise correction factor
-
-    @staticmethod
-    def from_metadata_node(noise_list_node: etree._Element, swath: str) -> S1Noise:
-        """Generating S1Noise object directly from metadata xml nodes.
-
-        Parameters
-        ----------
-        noise_list_node : etree._Element
-            noiseList metadata xml node
-        swath : str
-            swath of interest
-
-        Returns
-        -------
-        S1Noise
-            noise correction factor dataclass
-        """
-
-        # taking only the nodes corresponding to the selected swath
-        filtered_nodes = filter(lambda x: x.find("swath").text == swath, noise_list_node)
-
-        time_axis = []
-        noise_power_correction_factor = []
-        noise_lines_num = []
-        for item in filtered_nodes:
-            time_axis.append(PreciseDateTime.from_utc_string(item.find("azimuthTime").text))
-            noise_power_correction_factor.append(float(item.find("noisePowerCorrectionFactor").text))
-            noise_lines_num.append(int(item.find("numberOfNoiseLines").text))
-
-        return S1Noise(
-            swath=swath,
-            time_axis=np.array(time_axis),
-            noise_power_correction_factor=np.array(noise_power_correction_factor),
-            noise_lines_num=np.array(noise_lines_num),
-        )
-
-
-@dataclass
-class S1RangeNoiseVector:
-    """Sentinel-1 noise vector dataclass"""
-
-    azimuth_time: PreciseDateTime
-    line: int
-    pixels: np.ndarray
-    lut: np.ndarray
-
-    @classmethod
-    def from_node(cls, node: etree._Element) -> S1RangeNoiseVector:
-        """Generating S1RangeNoiseVector object directly from metadata xml node.
-
-        Parameters
-        ----------
-        node : etree._Element
-            noiseRangeVectorList/noiseRangeVector xml node
-
-        Returns
-        -------
-        S1RangeNoiseVector
-            object corresponding to the input xml node
-        """
-        azimuth_time = PreciseDateTime.from_utc_string(node.find("azimuthTime").text)
-        line = int(node.find("line").text)
-        pixels = np.array([int(p) for p in node.find("pixel").text.split()])
-        lut = np.array([float(p) for p in node.find("noiseRangeLut").text.split()])
-        return cls(azimuth_time=azimuth_time, line=line, pixels=pixels, lut=lut)
-
-
-@dataclass
-class S1AzimuthNoiseVector:
-    """Sentinel-1 noise vector dataclass"""
-
-    swath: str
-    first_azimuth_line: int
-    last_azimuth_line: int
-    first_range_sample: int
-    last_range_sample: int
-    lines: np.ndarray
-    lut: np.ndarray
-
-    @classmethod
-    def from_node(cls, node: etree._Element) -> S1AzimuthNoiseVector:
-        """Generating S1AzimuthNoiseVector object directly from metadata xml node.
-
-        Parameters
-        ----------
-        node : etree._Element
-            noiseAzimuthVectorList/noiseAzimuthVector xml node
-
-        Returns
-        -------
-        S1AzimuthNoiseVector
-            object corresponding to the input xml node
-        """
-        swath = node.find("swath").text
-        first_azimuth_line = int(node.find("firstAzimuthLine").text)
-        last_azimuth_line = int(node.find("lastAzimuthLine").text)
-        first_range_sample = int(node.find("firstRangeSample").text)
-        last_range_sample = int(node.find("lastRangeSample").text)
-        lines = np.array([int(p) for p in node.find("line").text.split()])
-        lut = np.array([float(p) for p in node.find("noiseAzimuthLut").text.split()])
-        return cls(
-            swath=swath,
-            first_azimuth_line=first_azimuth_line,
-            last_azimuth_line=last_azimuth_line,
-            first_range_sample=first_range_sample,
-            last_range_sample=last_range_sample,
-            lines=lines,
-            lut=lut,
-        )
-
-
-@dataclass
-class S1AntennaPattern:
-    """Sentinel-1 antenna pattern dataclass"""
-
-    swath: str  # swath of to the current antenna pattern data
-    time_axis: np.ndarray  # Zero Doppler azimuth time at which antenna pattern applies
-    slant_range_time_array: np.ndarray  # two-way slant range time array for this antenna pattern [s]
-    elevation_angle_array: np.ndarray  # corresponding elevation angle for this antenna pattern [degrees]
-    elevation_pattern_array: np.ndarray  # corresponding two-way antenna elevation pattern value for this point
-    incidence_angle: np.ndarray  # corresponding incidence angle value for this point [degrees]
-    terrain_height: np.ndarray  # average terrain height in range for this antenna pattern [m]
-    roll: np.ndarray  # estimated roll angle for this antenna pattern [degrees]
-
-    @staticmethod
-    def from_metadata_node(antenna_pattern_list_node: etree._Element, swath: str) -> S1AntennaPattern:
-        """Generating S1AntennaPattern object directly from metadata xml nodes.
-
-        Parameters
-        ----------
-        antenna_pattern_list_node : etree._Element
-            antennaPatternList metadata xml node
-        swath : str
-            swath of interest
-
-        Returns
-        -------
-        S1Noise
-            antenna pattern dataclass
-        """
-
-        # taking only the nodes corresponding to the selected swath
-        filtered_nodes = filter(lambda x: x.find("swath").text == swath, antenna_pattern_list_node)
-
-        def _parse_ap(array: np.ndarray) -> np.ndarray:
-            return array[:, 0] + 1j * array[:, 1]
-
-        time_axis = []
-        slant_range_time_array = []
-        elevation_angle_array = []
-        elevation_pattern_array = []
-        incidence_angle = []
-        terrain_height = []
-        roll = []
-        for item in filtered_nodes:
-            time_axis.append(PreciseDateTime.from_utc_string(item.find("azimuthTime").text))
-            slant_range_time_array.append(
-                np.array([float(c) for c in item.find("slantRangeTime").text.split(" ") if c])
-            )
-            elevation_angle_array.append(np.array([float(c) for c in item.find("elevationAngle").text.split(" ") if c]))
-            elevation_pattern_array.append(
-                _parse_ap(
-                    np.array([float(c) for c in item.find("elevationPattern").text.split(" ") if c]).reshape(-1, 2)
-                )
-            )
-            incidence_angle.append(np.array([float(c) for c in item.find("incidenceAngle").text.split(" ") if c]))
-            terrain_height.append(float(item.find("terrainHeight").text))
-            roll.append(float(item.find("roll").text))
-
-        return S1AntennaPattern(
-            swath=swath,
-            time_axis=np.array(time_axis),
-            slant_range_time_array=np.stack(slant_range_time_array),
-            elevation_angle_array=np.stack(elevation_angle_array),
-            elevation_pattern_array=np.stack(elevation_pattern_array),
-            incidence_angle=np.stack(incidence_angle),
-            terrain_height=np.array(terrain_height),
-            roll=np.array(roll),
-        )
-
-
-@dataclass
-class S1GeneralChannelInfo:
-    """Sentinel-1 general channel info representation dataclass"""
-
-    mission_id: str
-    channel_id: int
-    swath: str
-    product_type: S1L1ProductType
-    polarization: SARPolarization
-    projection: SARProjection
-    mode: S1AcquisitionMode
-    acquisition_mode_std: StandardSARAcquisitionMode
-    orbit_direction: OrbitDirection
-    range_sampling_rate: float
-    signal_frequency: float
-    start_time: PreciseDateTime
-    stop_time: PreciseDateTime
-
-    @staticmethod
-    def from_metadata_node(header_node: etree._Element, product_info_node: etree._Element) -> S1GeneralChannelInfo:
-        """Generating S1GeneralChannelInfo object directly from metadata xml nodes.
-
-        Parameters
-        ----------
-        header_node : etree._Element
-            adsHeader metadata xml node
-        product_info_node : etree._Element
-            generalAnnotation/productInformation metadata xml node
-
-        Returns
-        -------
-        S1GeneralChannelInfo
-            general channel info dataclass
-        """
-
-        header_dict = dict([(convert_camel2snake(h.tag), h.text) for h in header_node])
-        product_info_dict = dict([(convert_camel2snake(p.tag), p.text) for p in product_info_node])
-
-        polarization = header_dict["polarisation"]
-        # converting the polarization string value to a proper input format for SARPolarization enum
-        if len(polarization) == 2:
-            polarization = polarization[0] + "/" + polarization[1]
-
-        mode = S1AcquisitionMode(header_dict["mode"])
-        if mode in (S1AcquisitionMode.EW, S1AcquisitionMode.IW):
-            mode_std = StandardSARAcquisitionMode.TOPSAR
-        elif mode == S1AcquisitionMode.WV:
-            mode_std = StandardSARAcquisitionMode.WAVE
-        elif mode in (
-            S1AcquisitionMode.SM,
-            S1AcquisitionMode.S1,
-            S1AcquisitionMode.S2,
-            S1AcquisitionMode.S3,
-            S1AcquisitionMode.S4,
-            S1AcquisitionMode.S5,
-            S1AcquisitionMode.S6,
-        ):
-            mode_std = StandardSARAcquisitionMode.STRIPMAP
-        elif mode == S1AcquisitionMode.EN:
-            mode_std = StandardSARAcquisitionMode.ELEVATION_NOTCH
-        else:
-            mode_std = StandardSARAcquisitionMode.UNKNOWN
-
-        general_info = S1GeneralChannelInfo(
-            mission_id=header_dict["mission_id"],
-            channel_id=int(header_dict["image_number"]),
-            swath=header_dict["swath"],
-            product_type=S1L1ProductType(header_dict["product_type"]),
-            polarization=SARPolarization(polarization),
-            projection=SARProjection(product_info_dict["projection"].upper()),
-            mode=mode,
-            acquisition_mode_std=mode_std,
-            orbit_direction=OrbitDirection(product_info_dict["pass"].lower()),
-            range_sampling_rate=float(product_info_dict["range_sampling_rate"]),
-            signal_frequency=float(product_info_dict["radar_frequency"]),
-            start_time=PreciseDateTime.from_utc_string(header_dict["start_time"]),
-            stop_time=PreciseDateTime.from_utc_string(header_dict["stop_time"]),
-        )
-
-        return general_info
-
-
-@dataclass
-class S1Attitude:
-    """Sentinel-1 sensor's attitude"""
-
-    num: int  # attitude data numerosity
-    frame: S1ReferenceFrameType  # reference frame of the attitude data.
-    quaternions: np.ndarray  # attitude quaternion as extracted from ancillary attitude data (N, 4)
-    angular_velocities: np.ndarray  # angular velocity as extracted from ancillary attitude data [degrees/s] (N, 3)
-    roll: np.ndarray  # platform roll
-    pitch: np.ndarray  # platform pitch
-    yaw: np.ndarray  # platform yaw
-    time_axis: np.ndarray  # PreciseDateTime axis to which attitude data applies
-
-    @staticmethod
-    def _get_quaternions_from_node(node: etree._Element) -> np.ndarray:
-        """Extracting quaternions array shape (N, 4) with q0, q1, q2 and q3 components from xml attitude node.
-
-        Parameters
-        ----------
-        node : etree._Element
-            attitudeList xml node
-
-        Returns
-        -------
-        np.ndarray
-            quaternions array, (N, 4)
-        """
-        q_0 = np.array([float(q.text) for q in node.findall("./attitude/q0")])
-        q_1 = np.array([float(q.text) for q in node.findall("./attitude/q1")])
-        q_2 = np.array([float(q.text) for q in node.findall("./attitude/q2")])
-        q_3 = np.array([float(q.text) for q in node.findall("./attitude/q3")])
-        return np.stack([q_0, q_1, q_2, q_3], axis=1)
-
-    @staticmethod
-    def _get_angular_velocities_from_node(node: etree._Element) -> np.ndarray:
-        """Extracting angular velocities array shape (N, 3) with wx, wy and wz components from xml attitude node.
-
-        Parameters
-        ----------
-        node : etree._Element
-            attitudeList xml node
-
-        Returns
-        -------
-        np.ndarray
-            angular velocities array, (N, 3)
-        """
-        w_x = np.array([float(q.text) for q in node.findall("./attitude/wx")])
-        w_y = np.array([float(q.text) for q in node.findall("./attitude/wy")])
-        w_z = np.array([float(q.text) for q in node.findall("./attitude/wz")])
-        return np.stack([w_x, w_y, w_z], axis=1)
-
-    @staticmethod
-    def from_metadata_node(attitude_node: etree._Element) -> S1Attitude:
-        """Generating S1Attitude object directly from metadata xml node.
-
-        Parameters
-        ----------
-        attitude_node : etree._Element
-            attitudeList xml node
-
-        Returns
-        -------
-        S1Attitude
-            sensor's attitude dataclass
-        """
-
-        numerosity = int(attitude_node.values()[0])
-        quaternions = S1Attitude._get_quaternions_from_node(node=attitude_node)
-        angular_velocities = S1Attitude._get_angular_velocities_from_node(node=attitude_node)
-        yaw = np.array([float(y.text) for y in attitude_node.findall("./attitude/yaw")])
-        pitch = np.array([float(p.text) for p in attitude_node.findall("./attitude/pitch")])
-        roll = np.array([float(r.text) for r in attitude_node.findall("./attitude/roll")])
-        frames = [frame.text for frame in attitude_node.findall("./attitude/frame")]
-        time_axis = np.array(
-            [PreciseDateTime.from_utc_string(time.text) for time in attitude_node.findall("./attitude/time")]
-        )
-
-        assert len(set(frames)) == 1
-        assert (
-            quaternions.shape[0]
-            == angular_velocities.shape[0]
-            == yaw.size
-            == pitch.size
-            == roll.size
-            == time_axis.size
-            == len(frames)
-            == numerosity
-        )
-
-        attitude = S1Attitude(
-            num=numerosity,
-            quaternions=quaternions,
-            angular_velocities=angular_velocities,
-            frame=S1ReferenceFrameType(set(frames).pop()),
-            yaw=yaw,
-            pitch=pitch,
-            roll=roll,
-            time_axis=time_axis,
-        )
-
-        return attitude
-
-
-@dataclass
-class S1Pulse:
-    """Sentinel-1 pulse info"""
-
-    length: float
-    bandwidth: float
-    energy: float
-    start_frequency: float
-    start_phase: float
-    direction: str
-    tx_pulse_latch_time: float = _S1_TX_PULSE_LATCH_TIME
-
-    @staticmethod
-    def from_metadata_nodes(swath_processing_node: etree._Element, downlink_info_node: etree._Element) -> S1Pulse:
-        """Generating S1Pulse object directly from metadata xml nodes.
-
-        Parameters
-        ----------
-        swath_processing_node : etree._Element
-            swathProcParams xml node
-        downlink_info_node : etree._Element
-            downlinkInformation xml node
-
-        Returns
-        -------
-        S1Pulse
-            pulse info dataclass
-        """
-        # TODO: check this
-        return S1Pulse(
-            length=float(downlink_info_node.find("downlinkValues/txPulseLength").text),
-            bandwidth=float(swath_processing_node.find("rangeProcessing/totalBandwidth").text),
-            energy=1.0,
-            start_frequency=float(downlink_info_node.find("downlinkValues/txPulseStartFrequency").text),
-            start_phase=0.0,
-            direction="UP",
-        )
-
-
-@dataclass
-class S1ChannelMetadata:
-    """Sentinel-1 channel metadata xml file wrapper"""
-
-    general_info: S1GeneralChannelInfo
-    orbit: Trajectory
-    image_radiometric_quantity: SARRadiometricQuantity
-    attitude: S1Attitude
-    burst_info: BurstInfo
-    raster_info: RasterInfo
-    dataset_info: DatasetInfo
-    swath_info: SwathInfo
-    sampling_constants: SARSamplingFrequencies
-    acquisition_timeline: AcquisitionTimeline
-    doppler_centroid_poly: DopplerEvaluator
-    doppler_rate_poly: DopplerEvaluator
-    pulse: S1Pulse
-    coordinate_conversions: CoordinatesConversions
-    state_vectors: StateVectors
-    chirp_replica: dict[str, S1ChirpReplica]  # dictionary key is the swath
-    noise: dict[str, S1Noise]  # dictionary key is the swath
-    antenna_pattern: dict[str, S1AntennaPattern]  # dictionary key is the swath
-    burst_sensing_times: np.ndarray | None  # burst sensing times array
+    q_0 = np.array([float(q.text) for q in node.findall("./attitude/q0")])
+    q_1 = np.array([float(q.text) for q in node.findall("./attitude/q1")])
+    q_2 = np.array([float(q.text) for q in node.findall("./attitude/q2")])
+    q_3 = np.array([float(q.text) for q in node.findall("./attitude/q3")])
+    return np.stack([q_0, q_1, q_2, q_3], axis=1)
+
+
+def _get_attitude_angular_velocities_from_node(node: etree._Element) -> np.ndarray:
+    """Extracting angular velocities array shape (N, 3) with wx, wy and wz components from xml attitude node.
+
+    Parameters
+    ----------
+    node : etree._Element
+        attitudeList xml node
+
+    Returns
+    -------
+    np.ndarray
+        angular velocities array, (N, 3)
+    """
+    w_x = np.array([float(q.text) for q in node.findall("./attitude/wx")])
+    w_y = np.array([float(q.text) for q in node.findall("./attitude/wy")])
+    w_z = np.array([float(q.text) for q in node.findall("./attitude/wz")])
+    return np.stack([w_x, w_y, w_z], axis=1)
 
 
 class S1Manifest:
@@ -1422,7 +1078,7 @@ class S1Manifest:
         )
 
 
-class SAFEFolderLayout:
+class S1SAFEFolderLayout:
     """SAFE file main directory architecture"""
 
     def __init__(self, path: Path) -> None:
@@ -1466,13 +1122,13 @@ class SAFEFolderLayout:
         return self._calibrations_dir
 
 
-class S1Product:
-    """Sentinel-1 product object"""
+class S1SAFEProduct:
+    """Sentinel-1 SAFE product object"""
 
     def __init__(self, path: str | Path) -> None:
         self._product_path = Path(path)
-        self._product_name = self._product_path.name.replace(".SAFE", "")
-        self._layout = SAFEFolderLayout(self._product_path)
+        self._product_name = self._product_path.name.replace(PRODUCT_FORMAT_EXTENSION, "")
+        self._layout = S1SAFEFolderLayout(self._product_path)
         self._manifest = S1Manifest(manifest_path=self._layout.manifest)
 
         # locating relative data and metadata paths inside SAFE product folder
@@ -1629,7 +1285,7 @@ def is_s1_safe_product(product: str | Path) -> bool:
         - path exists
         - path is a directory
         - path ends with SAFE
-        - S1Product can be instantiated
+        - S1SAFEProduct can be instantiated
 
     Parameters
     ----------
@@ -1646,11 +1302,11 @@ def is_s1_safe_product(product: str | Path) -> bool:
     if not product.exists() or not product.is_dir():
         return False
 
-    if not product.name.endswith(".SAFE"):
+    if not product.name.endswith(PRODUCT_FORMAT_EXTENSION):
         return False
 
     try:
-        S1Product(product)
+        S1SAFEProduct(product)
     except Exception:
         return False
 
