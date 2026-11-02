@@ -5,21 +5,141 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
+import numpy.typing as npt
 import xarray as xr
 from numpy.polynomial import Polynomial
 from perseo_core.timing import PreciseDateTime
 
-from eo_products.common.utilities import (
-    ConversionFunction,
-    CoordinatesConversions,
-    DopplerEvaluator,
-)
+from eo_products.common.utilities import ConversionFunction, CoordinatesConversions, DopplerEvaluator, SARPolarization
 from eo_products.sentinel1.common import S1AntennaPattern, S1DCEstimateMethod, S1Noise
 
 PRODUCT_FORMAT_EXTENSION = ".zarr"
+
+
+@dataclass
+class S1ZarrBurstStructure:
+    """Internal definition of a burst for the Sentinel-1 Zarr product."""
+
+    name: str
+    swath: str
+    polarization: SARPolarization
+    lines: int
+    samples: int
+    azimuth_start_time: PreciseDateTime
+    azimuth_stop_time: PreciseDateTime
+    slant_range_start_time: float
+    slant_range_stop_time: float
+
+
+@dataclass
+class S1ZarrChannelStructure:
+    """Internal definition of a channel for the Sentinel-1 Zarr product."""
+
+    name: str
+    bursts_structures: list[S1ZarrBurstStructure] | None
+
+    bursts: list[str] = field(init=False)
+    swath: str = field(init=False)
+    polarization: SARPolarization = field(init=False)
+    lines: int = field(init=False)
+    global_burst_start_lines: npt.NDArray[np.integer] = field(init=False)
+    samples: int = field(init=False)
+    lines_per_burst: int = field(init=False)
+    azimuth_start_time: PreciseDateTime = field(init=False)
+    azimuth_stop_time: PreciseDateTime = field(init=False)
+    slant_range_start_time: float = field(init=False)
+    slant_range_stop_time: float = field(init=False)
+
+    _burst_map: dict[str, S1ZarrBurstStructure] = field(
+        init=False,
+        repr=False,
+    )
+
+    def __post_init__(self) -> None:
+        if not self.bursts_structures:
+            raise ValueError("At least one burst structure is required.")
+        self.bursts_structures.sort(key=lambda burst: burst.azimuth_start_time)
+
+        swath_id = {(b.swath, b.polarization) for b in self.bursts_structures}
+        assert len(swath_id) == 1, "Bursts cannot have different polarizations/swaths in same channels"
+        swath_id = swath_id.pop()
+
+        lines_per_burst = {b.lines for b in self.bursts_structures}
+        assert len(lines_per_burst) == 1, "Bursts with different lines_per_burst in same channel"
+
+        samples = {b.samples for b in self.bursts_structures}
+        assert len(samples) == 1, "Bursts with different samples_per_burst in same channel"
+
+        self._burst_map = {burst.name: burst for burst in self.bursts_structures}
+
+        if len(self._burst_map) != len(self.bursts_structures):
+            raise ValueError("Duplicate burst names found.")
+
+        self.swath = swath_id[0]
+        self.polarization = swath_id[1]
+        self.bursts = list(self._burst_map.keys())
+        self.lines_per_burst = lines_per_burst.pop()
+        self.lines = self.lines_per_burst * len(self.bursts_structures)
+        self.global_burst_start_lines = np.r_[[0], np.cumsum([self.lines_per_burst] * len(self.bursts_structures))]
+        self.samples = samples.pop()
+        self.azimuth_start_time = self.bursts_structures[0].azimuth_start_time
+        self.azimuth_stop_time = self.bursts_structures[-1].azimuth_stop_time
+        self.slant_range_start_time = self.bursts_structures[0].slant_range_start_time
+        self.slant_range_stop_time = self.bursts_structures[-1].slant_range_stop_time
+
+    def get_burst_structure(self, burst: str) -> S1ZarrBurstStructure:
+        try:
+            return self._burst_map[burst]
+        except KeyError:
+            raise KeyError(f"Burst '{burst}' not found.") from None
+
+
+@dataclass
+class S1ZarrInternalStructureMap:
+    """Definition of internal structure and channels of the Sentinel-1 Zarr product."""
+
+    channel_structures: list[S1ZarrChannelStructure]
+
+    # Generated fields
+    channels: list[str] = field(init=False)
+    first_azimuth_time: PreciseDateTime = field(init=False)
+    last_azimuth_time: PreciseDateTime = field(init=False)
+    slant_range_start_time: float = field(init=False)
+    slant_range_stop_time: float = field(init=False)
+
+    _channel_map: dict[str, S1ZarrChannelStructure] = field(
+        init=False,
+        repr=False,
+    )
+
+    def __post_init__(self) -> None:
+        if not self.channel_structures:
+            raise ValueError("At least one channel structure is required.")
+
+        self.channel_structures.sort(key=lambda channel: channel.azimuth_start_time)
+
+        self._channel_map = {channel.name: channel for channel in self.channel_structures}
+
+        if len(self._channel_map) != len(self.channel_structures):
+            raise ValueError("Duplicate channel names found.")
+
+        self.channels = list(self._channel_map)
+
+        self.first_azimuth_time = self.channel_structures[0].azimuth_start_time
+        self.last_azimuth_time = max(c.azimuth_stop_time for c in self.channel_structures)
+
+        self.slant_range_start_time = min(c.slant_range_start_time for c in self.channel_structures)
+        self.slant_range_stop_time = max(c.slant_range_stop_time for c in self.channel_structures)
+
+    def get_channel_structure(self, channel: str) -> S1ZarrChannelStructure:
+        try:
+            return self._channel_map[channel]
+        except KeyError:
+            raise KeyError(f"Channel '{channel}' not found.") from None
 
 
 class S1ZarrProduct:
@@ -29,65 +149,91 @@ class S1ZarrProduct:
         self._product_path = Path(path)
         self._product_name = self._product_path.name.replace(PRODUCT_FORMAT_EXTENSION, "")
 
-        dt = xr.open_datatree(self._product_path, engine="zarr", chunks={})
+        try:
+            dt = xr.open_datatree(self._product_path, engine="zarr", chunks={})
 
-        self.sensor = dt.attrs["stac_discovery"]["properties"]["platform"].replace("sentinel-", "s")
+            self.sensor = dt.attrs["stac_discovery"]["properties"]["platform"].replace("sentinel-", "s")
 
-        # acquisition time
-        self._acq_time = PreciseDateTime.fromisoformat(dt.attrs["stac_discovery"]["properties"]["datetime"])
+            # acquisition time
+            self._acq_time = PreciseDateTime.fromisoformat(dt.attrs["stac_discovery"]["properties"]["datetime"])
 
-        # footprint
-        bbox_lat = [
-            dt.attrs["stac_discovery"]["bbox"][1],
-            dt.attrs["stac_discovery"]["bbox"][3],
-        ]
-        bbox_lon = [
-            dt.attrs["stac_discovery"]["bbox"][0],
-            dt.attrs["stac_discovery"]["bbox"][2],
-        ]
-        self._footprint = [min(bbox_lat), max(bbox_lat), min(bbox_lon), max(bbox_lon)]
+            # footprint
+            bbox_lat = [
+                dt.attrs["stac_discovery"]["bbox"][1],
+                dt.attrs["stac_discovery"]["bbox"][3],
+            ]
+            bbox_lon = [
+                dt.attrs["stac_discovery"]["bbox"][0],
+                dt.attrs["stac_discovery"]["bbox"][2],
+            ]
+            self._footprint = [min(bbox_lat), max(bbox_lat), min(bbox_lon), max(bbox_lon)]
 
-        # TODO: check with Wave products
-        self._internal_structure_map = self._internal_structure_mapping(groups=dt.groups)
+            # TODO: check with Wave products
+            self._internal_structure_map = self._internal_structure_mapping(prod=dt)
 
-        first_key = next(iter(self._internal_structure_map))
-        first_item = self._internal_structure_map[first_key][0]
-        processing_history: dict[str, list[dict[str]]] = dt[first_item].attrs["processing_history"]
+            first_channel = self._internal_structure_map.get_channel_structure(self._internal_structure_map.channels[0])
+            processing_history: dict[str, list[dict[str]]] = dt[first_channel.bursts[0]].attrs["processing_history"]
 
-        adf = next(
-            (item["adfs"] for history in processing_history.values() for item in history if "adfs" in item),
-            None,
-        )
-        self._adf = {
-            "AUX_PP1": next((p for p in adf if "AUX_PP1" in p), None),
-            "AUX_CAL": next((p for p in adf if "AUX_CAL" in p), None),
-            "AUX_INS": next((p for p in adf if "AUX_INS" in p), None),
-            "ORBIT": next((p for p in adf if "ORB_" in p), None),
-        }
-
-        dt.close()
+            adf = next(
+                (item["adfs"] for history in processing_history.values() for item in history if "adfs" in item),
+                None,
+            )
+            self._adf = {
+                "AUX_PP1": next((p for p in adf if "AUX_PP1" in p), None),
+                "AUX_CAL": next((p for p in adf if "AUX_CAL" in p), None),
+                "AUX_INS": next((p for p in adf if "AUX_INS" in p), None),
+                "ORBIT": next((p for p in adf if "ORB_" in p), None),
+            }
+        finally:
+            dt.close()
 
     def _channel_pattern_from_group(self, path: str) -> str:
         """Get the channel pattern pol_swath from from full group name."""
         name_parts = path.replace("/measurements", "").split("_")
         return "_".join([name_parts[-3], name_parts[-2]]).lower()
 
-    def _internal_structure_mapping(self, groups: list[str]) -> dict[str, list[str]]:
+    def _internal_structure_mapping(self, prod: xr.DataTree) -> S1ZarrInternalStructureMap:
         """Defining internal channel to groups association structure."""
         group_names = {
-            path.replace("/measurements", "").replace("/", "") for path in groups if path.endswith("/measurements")
+            path.replace("/measurements", "").replace("/", "") for path in prod.groups if path.endswith("/measurements")
         }
         unique_channels = sorted(
             {self._channel_pattern_from_group(g) for g in group_names},
             key=lambda x: x.split("_")[-1],
         )
 
-        return {
+        burst_channels_association = {
             "_".join([self.sensor, ch.split("_")[1], ch.split("_")[0]]): sorted(
                 [g for g in group_names if ch.replace(self.sensor, "").upper() in g]
             )
             for ch in unique_channels
         }
+        channels_struct = []
+        for channel, bursts in burst_channels_association.items():
+            name_parts = channel.split("_")
+            swath = name_parts[-2].upper()
+            pol = SARPolarization[name_parts[-1].upper()]
+            burst_struct = []
+            for burst in bursts:
+                burst_struct.append(
+                    S1ZarrBurstStructure(
+                        name=burst,
+                        swath=swath,
+                        polarization=pol,
+                        lines=prod[burst].attrs["other_metadata"]["swath_timing"]["lines_per_burst"],
+                        samples=prod[burst].attrs["other_metadata"]["swath_timing"]["samples_per_burst"],
+                        azimuth_start_time=PreciseDateTime.fromisoformat(
+                            str(prod[burst]["measurements"].azimuth_time.data[0])
+                        ),
+                        azimuth_stop_time=PreciseDateTime.fromisoformat(
+                            str(prod[burst]["measurements"].azimuth_time.data[-1])
+                        ),
+                        slant_range_start_time=float(prod[burst]["measurements"].slant_range_time.data[0]),
+                        slant_range_stop_time=float(prod[burst]["measurements"].slant_range_time.data[-1]),
+                    )
+                )
+            channels_struct.append(S1ZarrChannelStructure(name=channel, bursts_structures=burst_struct))
+        return S1ZarrInternalStructureMap(channel_structures=channels_struct)
 
     @property
     def auxiliary_data_files(self) -> dict[str, str]:
@@ -95,7 +241,7 @@ class S1ZarrProduct:
         return self._adf
 
     @property
-    def internal_structure_map(self) -> dict[str, list[str]]:
+    def internal_structure_map(self) -> S1ZarrInternalStructureMap:
         """Zarr channels internal structure map."""
         return self._internal_structure_map
 
@@ -117,7 +263,7 @@ class S1ZarrProduct:
     @property
     def channels_list(self) -> list[str]:
         """Returning the list of channels in terms of SwathID (swath-polarization)"""
-        return list(self._internal_structure_map.keys())
+        return self._internal_structure_map.channels
 
     @property
     def footprint(self) -> tuple[float, float, float, float]:

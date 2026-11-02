@@ -73,7 +73,12 @@ if __name__ == "__main__":
         r"C:\Users\giorgio.parma\Downloads\S1D_IW_SLC__1SDV_20260531T185815_20260531T185842_003032_0053A9_5658.zarr"
     )
     prod = open_product(prod_path)
-    from eo_products.sentinel1.zarr_prod.reader import read_channel_metadata, read_channel_noise_vectors
+    from eo_products.sentinel1.zarr_prod.reader import (
+        read_channel_data,
+        read_channel_metadata,
+        read_channel_noise_vectors,
+    )
 
     ch_metadata = read_channel_metadata(prod, prod.channels_list[0])
     ch_noise = read_channel_noise_vectors(prod, prod.channels_list[0])
+    data = read_channel_data(prod=prod, channel=prod.channels_list[0], block_to_read=[650, 835, 100, 1500])

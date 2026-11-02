@@ -125,6 +125,7 @@ class S1ChannelMetadata:
     chirp_replica: dict[str, S1ChirpReplica]  # dictionary key is the swath
     noise: dict[str, S1Noise]  # dictionary key is the swath
     attitude: S1Attitude | None
+    calibration_factor: float | None
 
 
 @dataclass

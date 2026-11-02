@@ -163,7 +163,7 @@ def read_channel_metadata(xml_path: str | Path, external_orbit_path: str | Path 
     antenna = safe_utils.antenna_pattern_from_metadata_nodes(antenna_pattern_list_node=antenna_pattern_list)
 
     # composing output channel dataclass
-    return safe_utils.S1SAFEChannelMetadata(
+    return S1ChannelMetadata(
         general_info=general_info,
         orbit=state_vectors.orbit,
         image_radiometric_quantity=SARRadiometricQuantity.BETA_NOUGHT,
@@ -183,6 +183,7 @@ def read_channel_metadata(xml_path: str | Path, external_orbit_path: str | Path 
         noise=noise,
         antenna_pattern=antenna,
         burst_sensing_times=burst_sensing_times,
+        calibration_factor=None,
     )
 
 
