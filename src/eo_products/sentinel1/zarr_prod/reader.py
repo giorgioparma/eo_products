@@ -16,7 +16,6 @@ from eo_products.common.utilities import (
     OrbitDirection,
     RasterInfo,
     RasterInfoAxis,
-    SARPolarization,
     SARProjection,
     SARRadiometricQuantity,
     SARSamplingFrequencies,
@@ -25,7 +24,6 @@ from eo_products.common.utilities import (
 )
 from eo_products.sentinel1.common import (
     S1_SIDE_LOOKING,
-    S1AcquisitionMode,
     S1AzimuthNoiseVector,
     S1ChannelMetadata,
     S1DCEstimateMethod,
@@ -36,6 +34,7 @@ from eo_products.sentinel1.common import (
     get_standard_acq_mode,
 )
 from eo_products.sentinel1.zarr_prod.utilities import (
+    acquisition_timeline_from_metadata,
     antenna_pattern_from_metadata,
     coordinates_conversions_from_metadata,
     doppler_centroid_from_metadata,
@@ -61,22 +60,19 @@ def read_channel_metadata(prod: zarr_utils.S1ZarrProduct, channel: str) -> S1Cha
     """
     channel_structure = prod.internal_structure_map.get_channel_structure(channel)
     first_burst_name = channel_structure.bursts[0]
+    prod_type = prod.internal_structure_map.product_type
+    mode = prod.internal_structure_map.mode
+    swath = channel_structure.swath
     try:
         dt = xr.open_datatree(prod.product_path, engine="zarr", chunks={})
 
-        mode = S1AcquisitionMode(dt.attrs["stac_discovery"]["properties"]["sar:instrument_mode"])
         orbit_direction = OrbitDirection(
             dt[first_burst_name].attrs["other_metadata"]["general_annotation"]["product_information"]["pass"].lower()
         )
-        swath = dt[first_burst_name].attrs["other_metadata"]["downlink_information"]["swath"]
         radar_frequency = dt[first_burst_name].attrs["other_metadata"]["general_annotation"]["product_information"][
             "radar_frequency"
         ]
-        prod_type = dt[first_burst_name].attrs["stac_discovery"]["properties"]["product:type"]
-        product_type = S1L1ProductType[prod_type[-3:]]
-        if product_type.name != "SLC":
-            raise RuntimeError("Only SLC support for now.")
-        polarization = SARPolarization[dt[first_burst_name].attrs["other_metadata"]["polarisation"]]
+
         sensor_name = prod.sensor.upper()
         projection = SARProjection(dt[first_burst_name].attrs["other_metadata"]["projection"].upper())
         orbit_time_axis = np.asarray(
@@ -90,8 +86,8 @@ def read_channel_metadata(prod: zarr_utils.S1ZarrProduct, channel: str) -> S1Cha
         general_info = S1GeneralChannelInfo(
             mission_id=sensor_name,
             swath=swath,
-            product_type=product_type,
-            polarization=polarization,
+            product_type=prod_type,
+            polarization=channel_structure.polarization,
             projection=projection,
             mode=mode,
             acquisition_mode_std=get_standard_acq_mode(mode),
@@ -158,7 +154,7 @@ def read_channel_metadata(prod: zarr_utils.S1ZarrProduct, channel: str) -> S1Cha
                 [channel_structure.get_burst_structure(b).azimuth_start_time for b in channel_structure.bursts]
             ),
             range_start_times=np.array(
-                [channel_structure.get_burst_structure(b).slant_range_start_time for b in channel_structure.bursts]
+                [channel_structure.get_burst_structure(b).range_start for b in channel_structure.bursts]
             ),
         )
         burst_sensing_times = np.array(
@@ -178,16 +174,29 @@ def read_channel_metadata(prod: zarr_utils.S1ZarrProduct, channel: str) -> S1Cha
             ],
             step_unit="s",
         )
-        # TODO: change for GRD
-        raster_samples = RasterInfoAxis(
-            length=dt[first_burst_name].attrs["other_metadata"]["image_annotation"]["image_information"][
-                "number_of_samples"
-            ],
-            start=dt[first_burst_name]["measurements"].slant_range_time.values[0],
-            step=1 / range_sampling_rate,
-            step_unit="s",
-        )
-        raster_info = RasterInfo(lines=raster_lines, samples=raster_samples)
+        if prod_type == S1L1ProductType.SLC:
+            raster_samples = RasterInfoAxis(
+                length=dt[first_burst_name].attrs["other_metadata"]["image_annotation"]["image_information"][
+                    "number_of_samples"
+                ],
+                start=dt[first_burst_name]["measurements"].slant_range_time.values[0],
+                step=1 / range_sampling_rate,
+                step_unit="s",
+            )
+            data_type = "FLOAT_COMPLEX"
+        else:
+            raster_samples = RasterInfoAxis(
+                length=dt[first_burst_name].attrs["other_metadata"]["image_annotation"]["image_information"][
+                    "number_of_samples"
+                ],
+                start=dt[first_burst_name]["measurements"].ground_range.values[0],
+                step=dt[first_burst_name].attrs["other_metadata"]["image_annotation"]["image_information"][
+                    "range_pixel_spacing"
+                ],
+                step_unit="m",
+            )
+            data_type = "FLOAT32"
+        raster_info = RasterInfo(lines=raster_lines, samples=raster_samples, data_type=data_type)
 
         doppler_centroid_poly = doppler_centroid_from_metadata(
             doppler_centroid=dt[first_burst_name]["conditions/doppler_centroid"],
@@ -200,7 +209,7 @@ def read_channel_metadata(prod: zarr_utils.S1ZarrProduct, channel: str) -> S1Cha
         )
 
         # TODO: implement for GRD
-        coordinate_conversions = coordinates_conversions_from_metadata(None)
+        coordinate_conversions = coordinates_conversions_from_metadata(coord_conversion_list=None)
 
         antenna_pattern = antenna_pattern_from_metadata(
             antenna_pattern=dt[first_burst_name]["conditions/antenna_pattern"]
@@ -210,7 +219,11 @@ def read_channel_metadata(prod: zarr_utils.S1ZarrProduct, channel: str) -> S1Cha
             noise_list=dt[first_burst_name].attrs["other_metadata"]["general_annotation"]["noise_list"], swath=swath
         )
 
-        acquisition_timeline = 1
+        acquisition_timeline = acquisition_timeline_from_metadata(
+            downlink_information_list=dt[first_burst_name].attrs["other_metadata"]["general_annotation"][
+                "downlink_information_list"
+            ]
+        )
 
         pulse_info = S1Pulse(
             length=dt[first_burst_name].attrs["other_metadata"]["downlink_information"]["tx_pulse_length"],
@@ -225,12 +238,7 @@ def read_channel_metadata(prod: zarr_utils.S1ZarrProduct, channel: str) -> S1Cha
             direction="UP",
         )
 
-        calibration_factor = dt[first_burst_name]["quality/calibration/dn"].values
-        # calibration_factor_beta = dt[first_burst_name]["quality/calibration/beta_nought"].values
-        # calibration_factor_sigma = dt[first_burst_name]["quality/calibration/sigma_nought"].values
-        # calibration_factor_gamma = dt[first_burst_name]["quality/calibration/gamma"].values
-        # ...
-        # 1 / float(cal_vectors[0].find("betaNought").text.split(" ")[0])
+        calibration_factor = 1 / float(dt[first_burst_name]["quality/calibration/beta_nought"].values[0, 0])
 
     finally:
         dt.close()
@@ -366,6 +374,7 @@ def read_channel_data(
     data_parts = []
     dt = xr.open_datatree(prod.product_path, engine="zarr", chunks={})
     var = list(dt[channel_structure.bursts[first_burst]]["measurements"].data_vars)[0]
+    range_dim = [v for v in list(dt[channel_structure.bursts[first_burst]]["measurements"].coords) if "range" in v][0]
 
     try:
         for burst_idx in range(first_burst, last_burst + 1):
@@ -380,10 +389,7 @@ def read_channel_data(
 
             data = (
                 burst_group[var]
-                .isel(
-                    azimuth_time=slice(local_start, local_stop),
-                    slant_range_time=slice(start_sample, stop_sample),
-                )
+                .isel(azimuth_time=slice(local_start, local_stop), **{range_dim: slice(start_sample, stop_sample)})
                 .values
             )
 

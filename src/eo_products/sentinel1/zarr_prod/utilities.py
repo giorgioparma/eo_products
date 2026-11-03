@@ -14,8 +14,20 @@ import xarray as xr
 from numpy.polynomial import Polynomial
 from perseo_core.timing import PreciseDateTime
 
-from eo_products.common.utilities import ConversionFunction, CoordinatesConversions, DopplerEvaluator, SARPolarization
-from eo_products.sentinel1.common import S1AntennaPattern, S1DCEstimateMethod, S1Noise
+from eo_products.common.utilities import (
+    AcquisitionTimeline,
+    ConversionFunction,
+    CoordinatesConversions,
+    DopplerEvaluator,
+    SARPolarization,
+)
+from eo_products.sentinel1.common import (
+    S1AcquisitionMode,
+    S1AntennaPattern,
+    S1DCEstimateMethod,
+    S1L1ProductType,
+    S1Noise,
+)
 
 PRODUCT_FORMAT_EXTENSION = ".zarr"
 
@@ -31,8 +43,8 @@ class S1ZarrBurstStructure:
     samples: int
     azimuth_start_time: PreciseDateTime
     azimuth_stop_time: PreciseDateTime
-    slant_range_start_time: float
-    slant_range_stop_time: float
+    range_start: float
+    range_stop: float
 
 
 @dataclass
@@ -51,8 +63,8 @@ class S1ZarrChannelStructure:
     lines_per_burst: int = field(init=False)
     azimuth_start_time: PreciseDateTime = field(init=False)
     azimuth_stop_time: PreciseDateTime = field(init=False)
-    slant_range_start_time: float = field(init=False)
-    slant_range_stop_time: float = field(init=False)
+    range_start: float = field(init=False)
+    range_stop: float = field(init=False)
 
     _burst_map: dict[str, S1ZarrBurstStructure] = field(
         init=False,
@@ -88,8 +100,8 @@ class S1ZarrChannelStructure:
         self.samples = samples.pop()
         self.azimuth_start_time = self.bursts_structures[0].azimuth_start_time
         self.azimuth_stop_time = self.bursts_structures[-1].azimuth_stop_time
-        self.slant_range_start_time = self.bursts_structures[0].slant_range_start_time
-        self.slant_range_stop_time = self.bursts_structures[-1].slant_range_stop_time
+        self.range_start = self.bursts_structures[0].range_start
+        self.range_stop = self.bursts_structures[-1].range_stop
 
     def get_burst_structure(self, burst: str) -> S1ZarrBurstStructure:
         try:
@@ -102,14 +114,16 @@ class S1ZarrChannelStructure:
 class S1ZarrInternalStructureMap:
     """Definition of internal structure and channels of the Sentinel-1 Zarr product."""
 
+    product_type: S1L1ProductType
+    mode: S1AcquisitionMode
     channel_structures: list[S1ZarrChannelStructure]
 
     # Generated fields
     channels: list[str] = field(init=False)
     first_azimuth_time: PreciseDateTime = field(init=False)
     last_azimuth_time: PreciseDateTime = field(init=False)
-    slant_range_start_time: float = field(init=False)
-    slant_range_stop_time: float = field(init=False)
+    range_start: float = field(init=False)
+    range_stop: float = field(init=False)
 
     _channel_map: dict[str, S1ZarrChannelStructure] = field(
         init=False,
@@ -132,8 +146,8 @@ class S1ZarrInternalStructureMap:
         self.first_azimuth_time = self.channel_structures[0].azimuth_start_time
         self.last_azimuth_time = max(c.azimuth_stop_time for c in self.channel_structures)
 
-        self.slant_range_start_time = min(c.slant_range_start_time for c in self.channel_structures)
-        self.slant_range_stop_time = max(c.slant_range_stop_time for c in self.channel_structures)
+        self.range_start = min(c.range_start for c in self.channel_structures)
+        self.range_stop = max(c.range_stop for c in self.channel_structures)
 
     def get_channel_structure(self, channel: str) -> S1ZarrChannelStructure:
         try:
@@ -169,7 +183,7 @@ class S1ZarrProduct:
             self._footprint = [min(bbox_lat), max(bbox_lat), min(bbox_lon), max(bbox_lon)]
 
             # TODO: check with Wave products
-            self._internal_structure_map = self._internal_structure_mapping(prod=dt)
+            self._internal_structure_map = zarr_internal_structure_mapping(prod=dt)
 
             first_channel = self._internal_structure_map.get_channel_structure(self._internal_structure_map.channels[0])
             processing_history: dict[str, list[dict[str]]] = dt[first_channel.bursts[0]].attrs["processing_history"]
@@ -186,54 +200,6 @@ class S1ZarrProduct:
             }
         finally:
             dt.close()
-
-    def _channel_pattern_from_group(self, path: str) -> str:
-        """Get the channel pattern pol_swath from from full group name."""
-        name_parts = path.replace("/measurements", "").split("_")
-        return "_".join([name_parts[-3], name_parts[-2]]).lower()
-
-    def _internal_structure_mapping(self, prod: xr.DataTree) -> S1ZarrInternalStructureMap:
-        """Defining internal channel to groups association structure."""
-        group_names = {
-            path.replace("/measurements", "").replace("/", "") for path in prod.groups if path.endswith("/measurements")
-        }
-        unique_channels = sorted(
-            {self._channel_pattern_from_group(g) for g in group_names},
-            key=lambda x: x.split("_")[-1],
-        )
-
-        burst_channels_association = {
-            "_".join([self.sensor, ch.split("_")[1], ch.split("_")[0]]): sorted(
-                [g for g in group_names if ch.replace(self.sensor, "").upper() in g]
-            )
-            for ch in unique_channels
-        }
-        channels_struct = []
-        for channel, bursts in burst_channels_association.items():
-            name_parts = channel.split("_")
-            swath = name_parts[-2].upper()
-            pol = SARPolarization[name_parts[-1].upper()]
-            burst_struct = []
-            for burst in bursts:
-                burst_struct.append(
-                    S1ZarrBurstStructure(
-                        name=burst,
-                        swath=swath,
-                        polarization=pol,
-                        lines=prod[burst].attrs["other_metadata"]["swath_timing"]["lines_per_burst"],
-                        samples=prod[burst].attrs["other_metadata"]["swath_timing"]["samples_per_burst"],
-                        azimuth_start_time=PreciseDateTime.fromisoformat(
-                            str(prod[burst]["measurements"].azimuth_time.data[0])
-                        ),
-                        azimuth_stop_time=PreciseDateTime.fromisoformat(
-                            str(prod[burst]["measurements"].azimuth_time.data[-1])
-                        ),
-                        slant_range_start_time=float(prod[burst]["measurements"].slant_range_time.data[0]),
-                        slant_range_stop_time=float(prod[burst]["measurements"].slant_range_time.data[-1]),
-                    )
-                )
-            channels_struct.append(S1ZarrChannelStructure(name=channel, bursts_structures=burst_struct))
-        return S1ZarrInternalStructureMap(channel_structures=channels_struct)
 
     @property
     def auxiliary_data_files(self) -> dict[str, str]:
@@ -375,7 +341,7 @@ def doppler_rate_from_metadata(azimuth_fm_rate_list: list[dict[str]]) -> Doppler
     )
 
 
-def coordinates_conversions_from_metadata(coord_conversion_node) -> CoordinatesConversions:
+def coordinates_conversions_from_metadata(coord_conversion_list) -> CoordinatesConversions:
     """Generating CoordinatesConversions object from metadata.
 
     About coefficients annotated in metadata:
@@ -399,7 +365,9 @@ def coordinates_conversions_from_metadata(coord_conversion_node) -> CoordinatesC
     CoordinatesConversions
         polynomial for coordinate conversion dataclass
     """
-    # TODO: implement for GRD
+    # polynomials written in metadata are supposed to be always already sorted in time, i.e. azimuth validity
+    # reference time will be strictly increasing (no need to be sorted afterwards)
+
     return CoordinatesConversions()
 
 
@@ -462,3 +430,156 @@ def noise_from_metadata(noise_list: list[dict[str]], swath: str) -> S1Noise:
         noise_power_correction_factor=np.array(noise_power_correction_factor),
         noise_lines_num=np.array(noise_lines_num),
     )
+
+
+def acquisition_timeline_from_metadata(downlink_information_list) -> AcquisitionTimeline:
+    """Creating a AcquisitionTimeline metadata element from safe xml nodes.
+
+    Parameters
+    ----------
+    downlink_info_node : etree._Element
+        downlinkInformation metadata xml node
+
+    Returns
+    -------
+    AcquisitionTimeline
+        AcquisitionTimeline metadata object
+    """
+    swst_list = [c["downlink_values"]["swst_list"] for c in downlink_information_list]
+    swl_list = [c["downlink_values"]["swl_list"] for c in downlink_information_list]
+
+    # missing elements set with these dummy values
+    missing_lines_number = 0
+    missing_lines_azimuth_times = None
+    noise_packets_number = 0
+    noise_packets_azimuth_times = None
+    internal_calibration_number = 0
+    internal_calibration_azimuth_times = None
+
+    swst_azimuth_times = []
+    swst_values = []
+    for swst in swst_list:
+        swst_azimuth_times.extend([PreciseDateTime.fromisoformat(s["azimuth_time"]) for s in swst])
+        swst_values.extend([s["value"] for s in swst])
+    swst_changes_number = len(swst_values)
+
+    swl_azimuth_times = []
+    swl_values = []
+    for swl in swl_list:
+        swl_azimuth_times.extend([PreciseDateTime.fromisoformat(s["azimuth_time"]) for s in swl])
+        swl_values.extend([s["value"] for s in swl])
+    swl_changes_number = len(swl_values)
+
+    return AcquisitionTimeline(
+        missing_lines_number=missing_lines_number,
+        missing_lines_azimuth_times=missing_lines_azimuth_times,
+        swst_changes_number=swst_changes_number,
+        swst_changes_azimuth_times=swst_azimuth_times,
+        swst_changes_values=swst_values,
+        noise_packets_number=noise_packets_number,
+        noise_packets_azimuth_times=noise_packets_azimuth_times,
+        internal_calibration_number=internal_calibration_number,
+        internal_calibration_azimuth_times=internal_calibration_azimuth_times,
+        swl_changes_number=swl_changes_number,
+        swl_changes_azimuth_times=swl_azimuth_times,
+        swl_changes_values=swl_values,
+    )
+
+
+def zarr_internal_structure_mapping(prod: xr.DataTree) -> S1ZarrInternalStructureMap:
+    """Defining internal channel to groups association structure.
+
+    Parameters
+    ----------
+    prod : xr.DataTree
+        zarr product
+
+    Returns
+    -------
+    S1ZarrInternalStructureMap
+        internal zarr structure channels-groups mapping
+    """
+    prod_type = prod.attrs["stac_discovery"]["properties"]["product:type"]
+    product_type = S1L1ProductType[prod_type[-3:]]
+    sensor = prod.attrs["stac_discovery"]["properties"]["platform"].replace("sentinel-", "s")
+    group_names = {
+        path.replace("/measurements", "").replace("/", "") for path in prod.groups if path.endswith("/measurements")
+    }
+
+    match product_type:
+        case S1L1ProductType.SLC:
+            mode = S1AcquisitionMode(prod.attrs["stac_discovery"]["properties"]["sar:instrument_mode"])
+            unique_channels = sorted(
+                {_channel_pattern_from_group(g) for g in group_names},
+                key=lambda x: x.split("_")[-1],
+            )
+
+            burst_channels_association = {
+                "_".join([sensor, ch.split("_")[1], ch.split("_")[0]]): sorted(
+                    [g for g in group_names if ch.replace(sensor, "").upper() in g]
+                )
+                for ch in unique_channels
+            }
+            channels_struct = []
+            for channel, bursts in burst_channels_association.items():
+                name_parts = channel.split("_")
+                swath = name_parts[-2].upper()
+                pol = SARPolarization[name_parts[-1].upper()]
+                burst_struct = []
+                for burst in bursts:
+                    burst_struct.append(
+                        S1ZarrBurstStructure(
+                            name=burst,
+                            swath=swath,
+                            polarization=pol,
+                            lines=prod[burst].attrs["other_metadata"]["swath_timing"]["lines_per_burst"],
+                            samples=prod[burst].attrs["other_metadata"]["swath_timing"]["samples_per_burst"],
+                            azimuth_start_time=PreciseDateTime.fromisoformat(
+                                str(prod[burst]["measurements"].azimuth_time.data[0])
+                            ),
+                            azimuth_stop_time=PreciseDateTime.fromisoformat(
+                                str(prod[burst]["measurements"].azimuth_time.data[-1])
+                            ),
+                            range_start=float(prod[burst]["measurements"].slant_range_time.data[0]),
+                            range_stop=float(prod[burst]["measurements"].slant_range_time.data[-1]),
+                        )
+                    )
+                channels_struct.append(S1ZarrChannelStructure(name=channel, bursts_structures=burst_struct))
+        case S1L1ProductType.GRD:
+            swath = prod.attrs["stac_discovery"]["properties"]["sar:instrument_mode"]
+            mode = swath
+            burst_channels_association = {
+                "_".join(["grd", swath.lower(), ch.split("_")[-1].lower()]): ch for ch in group_names
+            }
+            channels_struct = []
+            for channel, ch_group in burst_channels_association.items():
+                burst_struct = [
+                    S1ZarrBurstStructure(
+                        name=ch_group,
+                        swath=swath,
+                        polarization=SARPolarization[prod[ch_group].attrs["other_metadata"]["polarisation"]],
+                        lines=prod[ch_group].attrs["other_metadata"]["image_annotation"]["image_information"][
+                            "number_of_lines"
+                        ],
+                        samples=prod[ch_group].attrs["other_metadata"]["image_annotation"]["image_information"][
+                            "number_of_samples"
+                        ],
+                        azimuth_start_time=PreciseDateTime.fromisoformat(
+                            str(prod[ch_group]["measurements"].azimuth_time.data[0])
+                        ),
+                        azimuth_stop_time=PreciseDateTime.fromisoformat(
+                            str(prod[ch_group]["measurements"].azimuth_time.data[-1])
+                        ),
+                        range_start=float(prod[ch_group]["measurements"].ground_range.data[0]),
+                        range_stop=float(prod[ch_group]["measurements"].ground_range.data[-1]),
+                    )
+                ]
+                channels_struct.append(S1ZarrChannelStructure(name=channel, bursts_structures=burst_struct))
+
+    return S1ZarrInternalStructureMap(mode=mode, product_type=product_type, channel_structures=channels_struct)
+
+
+def _channel_pattern_from_group(path: str) -> str:
+    """Get the channel pattern pol_swath from from full group name."""
+    name_parts = path.replace("/measurements", "").split("_")
+    return "_".join([name_parts[-3], name_parts[-2]]).lower()
