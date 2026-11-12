@@ -12,13 +12,14 @@ import zarr
 from lxml import etree
 from tifffile import imread
 
-import eo_products.sentinel1.safe_prod.utilities as safe_utils
-from eo_products.common.utilities import SARRadiometricQuantity
+import eo_products.sentinel1.safe_prod.metadata as mtd_utils
+from eo_products.common.utilities import OrbitDirection, SARRadiometricQuantity
 from eo_products.sentinel1.auxiliaries.ext_orbit import read_external_orbit
 from eo_products.sentinel1.common import (
     S1AzimuthNoiseVector,
     S1ChannelMetadata,
     S1DCEstimateMethod,
+    S1L1ProductType,
     S1OrbitType,
     S1RangeNoiseVector,
 )
@@ -50,7 +51,7 @@ def read_channel_metadata(xml_path: str | Path, external_orbit_path: str | Path 
     header = root.find("adsHeader")
     general_annotation = root.find("generalAnnotation")
     product_info = general_annotation.find("productInformation")
-    general_info, range_sampling_rate = safe_utils.general_channel_info_from_metadata(
+    general_info, range_sampling_rate = mtd_utils.general_channel_info_from_metadata(
         header_node=header, product_info_node=product_info
     )
     image_annotation = root.find("imageAnnotation")
@@ -75,7 +76,7 @@ def read_channel_metadata(xml_path: str | Path, external_orbit_path: str | Path 
             orbit_type = S1OrbitType.DOWNLINK
         elif image_annotation.find("processingInformation/orbitSource").text == "Auxiliary":
             orbit_type = S1OrbitType.UNKNOWN
-        state_vectors = safe_utils.state_vectors_from_metadata(orbit_node=orbit_list, orbit_type=orbit_type)
+        state_vectors = mtd_utils.state_vectors_from_metadata(orbit_node=orbit_list, orbit_type=orbit_type)
     else:
         # reducing orbit span around start and end time of acquisition
         # 5 mins before start time and after stop time
@@ -90,79 +91,77 @@ def read_channel_metadata(xml_path: str | Path, external_orbit_path: str | Path 
     # updating orbit direction and type
     current_ind = int((general_info.start_time - state_vectors.time_axis[0]) / state_vectors.time_step)
     state_vectors.orbit_direction = (
-        safe_utils.OrbitDirection.ASCENDING
-        if state_vectors.velocities[current_ind][2] > 0
-        else safe_utils.OrbitDirection.DESCENDING
+        OrbitDirection.ASCENDING if state_vectors.velocities[current_ind][2] > 0 else OrbitDirection.DESCENDING
     )
 
     # attitude
-    attitude = safe_utils.attitude_from_metadata_node(attitude_node=attitude_list)
+    attitude = mtd_utils.attitude_from_metadata_node(attitude_node=attitude_list)
 
     # raster info
-    if general_info.product_type == safe_utils.S1L1ProductType.GRD:
+    if general_info.product_type == S1L1ProductType.GRD:
         # GRD
-        raster_info = safe_utils.raster_info_from_metadata_node(image_information_node=image_information)
+        raster_info = mtd_utils.raster_info_from_metadata_node(image_information_node=image_information)
     else:
         # SLC
-        raster_info = safe_utils.raster_info_from_metadata_node(
+        raster_info = mtd_utils.raster_info_from_metadata_node(
             image_information_node=image_information,
             samples_step=1 / range_sampling_rate,
         )
 
     # burst info
-    burst_info = safe_utils.burst_info_from_metadata(burst_node=swath_timing, raster_info=raster_info)
+    burst_info = mtd_utils.burst_info_from_metadata(burst_node=swath_timing, raster_info=raster_info)
 
     # burst sensing times
-    burst_sensing_times = safe_utils.burst_sensing_times_from_metadata(burst_node=swath_timing)
+    burst_sensing_times = mtd_utils.burst_sensing_times_from_metadata(burst_node=swath_timing)
 
     # dataset info
-    dataset_info = safe_utils.dataset_info_from_metadata_nodes(header_node=header, product_info_node=product_info)
+    dataset_info = mtd_utils.dataset_info_from_metadata_nodes(header_node=header, product_info_node=product_info)
 
     # swath info
-    swath_info = safe_utils.swath_info_from_metadata(
+    swath_info = mtd_utils.swath_info_from_metadata(
         product_info=product_info,
         downlink_info_node=downlink_info,
         swath=general_info.swath,
     )
 
     # sampling constants
-    sampling_constants = safe_utils.sampling_constants_from_metadata_nodes(
+    sampling_constants = mtd_utils.sampling_constants_from_metadata_nodes(
         swath_processing_node=swath_processing,
         product_info_node=product_info,
         image_info_node=image_information,
     )
 
     # acquisition timeline
-    acquisition_timeline = safe_utils.acquisition_timeline_from_metadata_nodes(downlink_info_node=downlink_info)
+    acquisition_timeline = mtd_utils.acquisition_timeline_from_metadata_nodes(downlink_info_node=downlink_info)
 
     # doppler centroid vector
     # TODO: check if forcing estimate method to be DATA is correct
-    doppler_centroid_poly = safe_utils.doppler_centroid_evaluator_from_metadata_nodes(
+    doppler_centroid_poly = mtd_utils.doppler_centroid_evaluator_from_metadata_nodes(
         dc_estimate_node=dc_estimate, estimate_method=S1DCEstimateMethod.DATA
     )
 
     # doppler rate vector
-    doppler_rate_poly = safe_utils.doppler_rate_evaluator_from_metadata_nodes(azimuth_fm_rate_node=azimuth_fm_rate)
+    doppler_rate_poly = mtd_utils.doppler_rate_evaluator_from_metadata_nodes(azimuth_fm_rate_node=azimuth_fm_rate)
 
     # pulse
-    pulse = safe_utils.pulse_from_metadata_nodes(
+    pulse = mtd_utils.pulse_from_metadata_nodes(
         swath_processing_node=swath_processing, downlink_info_node=downlink_info
     )
 
     # coordinates conversion
-    coords_conversion = safe_utils.coordinates_conversions_from_metadata(coord_conversion_node=coord_conversion_node)
+    coords_conversion = mtd_utils.coordinates_conversions_from_metadata(coord_conversion_node=coord_conversion_node)
 
     # chirp replica
     chirp_replicas = []
     for item in replica_list_info:
-        chirp_replicas.append(safe_utils.chirp_replica_from_metadata_node(item))
+        chirp_replicas.append(mtd_utils.chirp_replica_from_metadata_node(item))
     chirp_replicas = {c.swath: c for c in chirp_replicas}
 
     # noise
-    noise = safe_utils.noise_from_metadata_nodes(noise_list_node=noise_list)
+    noise = mtd_utils.noise_from_metadata_nodes(noise_list_node=noise_list)
 
     # antenna pattern
-    antenna = safe_utils.antenna_pattern_from_metadata_nodes(antenna_pattern_list_node=antenna_pattern_list)
+    antenna = mtd_utils.antenna_pattern_from_metadata_nodes(antenna_pattern_list_node=antenna_pattern_list)
 
     # composing output channel dataclass
     return S1ChannelMetadata(
@@ -215,7 +214,7 @@ def read_channel_calibration(
     root = etree.parse(xml_path).getroot()
 
     cal_vector_node = root.find("calibrationVectorList")
-    return safe_utils.data_scaling_factor_from_metadata_node(
+    return mtd_utils.data_scaling_factor_from_metadata_node(
         calibration_vector_node=cal_vector_node,
         radiometric_quantity=radiometric_quantity,
     )
@@ -242,14 +241,14 @@ def read_channel_noise_vectors(
     root = etree.parse(str(noise_file)).getroot()
 
     azimuth_vectors = [
-        safe_utils.az_noise_vector_from_node(node=node)
+        mtd_utils.az_noise_vector_from_node(node=node)
         for node in root.findall("noiseAzimuthVectorList/noiseAzimuthVector")
     ]
     if not azimuth_vectors:
         azimuth_vectors = None
 
     range_vectors = [
-        safe_utils.rng_noise_vector_from_node(node=node)
+        mtd_utils.rng_noise_vector_from_node(node=node)
         for node in root.findall("noiseRangeVectorList/noiseRangeVector")
     ]
 

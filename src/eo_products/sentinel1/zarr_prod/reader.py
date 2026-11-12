@@ -9,7 +9,6 @@ import numpy as np
 import xarray as xr
 from perseo_core.timing import PreciseDateTime
 
-import eo_products.sentinel1.zarr_prod.utilities as zarr_utils
 from eo_products.common.utilities import (
     BurstInfo,
     DatasetInfo,
@@ -33,7 +32,7 @@ from eo_products.sentinel1.common import (
     S1RangeNoiseVector,
     get_standard_acq_mode,
 )
-from eo_products.sentinel1.zarr_prod.utilities import (
+from eo_products.sentinel1.zarr_prod.metadata import (
     acquisition_timeline_from_metadata,
     antenna_pattern_from_metadata,
     coordinates_conversions_from_metadata,
@@ -41,14 +40,15 @@ from eo_products.sentinel1.zarr_prod.utilities import (
     doppler_rate_from_metadata,
     noise_from_metadata,
 )
+from eo_products.sentinel1.zarr_prod.utilities import S1ZarrProduct
 
 
-def read_channel_metadata(prod: zarr_utils.S1ZarrProduct, channel: str) -> S1ChannelMetadata:
+def read_channel_metadata(prod: S1ZarrProduct, channel: str) -> S1ChannelMetadata:
     """Read channel metadata from the Zarr product.
 
     Parameters
     ----------
-    prod : zarr_utils.S1ZarrProduct
+    prod : S1ZarrProduct
         zarr product object
     channel : str
         selected channel
@@ -268,13 +268,13 @@ def read_channel_metadata(prod: zarr_utils.S1ZarrProduct, channel: str) -> S1Cha
 
 
 def read_channel_noise_vectors(
-    prod: zarr_utils.S1ZarrProduct, channel: str
+    prod: S1ZarrProduct, channel: str
 ) -> tuple[list[S1AzimuthNoiseVector] | None, list[S1RangeNoiseVector] | None]:
     """Reading channel azimuth and range noise vectors.
 
     Parameters
     ----------
-    prod : zarr_utils.S1ZarrProduct
+    prod : S1ZarrProduct
         zarr product object
     channel : str
         selected channel
@@ -328,7 +328,7 @@ def read_channel_noise_vectors(
 
 
 def read_channel_data(
-    prod: zarr_utils.S1ZarrProduct,
+    prod: S1ZarrProduct,
     channel: str,
     block_to_read: list[int],
     scaling_conversion: float = 1,
@@ -337,7 +337,7 @@ def read_channel_data(
 
     Parameters
     ----------
-    prod : zarr_utils.S1ZarrProduct
+    prod : S1ZarrProduct
         zarr product object
     channel : str
         selected channel
